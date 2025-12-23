@@ -1,4 +1,5 @@
-# 🎄 Grand Luxury Interactive 3D Christmas Tree
+   node --version
+   # 🎄 Grand Luxury Interactive 3D Christmas Tree
 
 > 一个基于 **React**, **Three.js (R3F)** 和 **AI 手势识别** 的高保真 3D 圣诞树 Web 应用。
 

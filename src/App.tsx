@@ -1,5 +1,5 @@
-import { useState, useMemo, useRef, useEffect, Suspense } from 'react';
-import { Canvas, useFrame, extend } from '@react-three/fiber';
+import { useState, useMemo, useRef, useEffect, Suspense, useCallback } from 'react';
+import { Canvas, useFrame, extend, useThree } from '@react-three/fiber';
 import {
   OrbitControls,
   Environment,
@@ -16,11 +16,9 @@ import { MathUtils } from 'three';
 import * as random from 'maath/random';
 import { GestureRecognizer, FilesetResolver, DrawingUtils } from "@mediapipe/tasks-vision";
 
-// --- 动态生成照片列表 (top.jpg + 1.jpg 到 31.jpg) ---
-const TOTAL_NUMBERED_PHOTOS =43;
-// 修改：将 top.jpg 加入到数组开头
+// --- 动态生成照片列表 (1.jpg 到 31.jpg) ---
+const TOTAL_NUMBERED_PHOTOS = 31;
 const bodyPhotoPaths = [
-  '/photos/top.jpg',
   ...Array.from({ length: TOTAL_NUMBERED_PHOTOS }, (_, i) => `/photos/${i + 1}.jpg`)
 ];
 
@@ -49,7 +47,6 @@ const CONFIG = {
   },
   tree: { height: 22, radius: 9 }, // 树体尺寸
   photos: {
-    // top 属性不再需要，因为已经移入 body
     body: bodyPhotoPaths
   }
 };
@@ -124,10 +121,11 @@ const Foliage = ({ state }: { state: 'CHAOS' | 'FORMED' }) => {
 };
 
 // --- Component: Photo Ornaments (Double-Sided Polaroid) ---
-const PhotoOrnaments = ({ state }: { state: 'CHAOS' | 'FORMED' }) => {
+const PhotoOrnaments = ({ state, onPhotoClick }: { state: 'CHAOS' | 'FORMED', onPhotoClick: (index: number, position: THREE.Vector3) => void }) => {
   const textures = useTexture(CONFIG.photos.body);
   const count = CONFIG.counts.ornaments;
   const groupRef = useRef<THREE.Group>(null);
+  const meshRefs = useRef<(THREE.Mesh | null)[]>([]);
 
   const borderGeometry = useMemo(() => new THREE.PlaneGeometry(1.2, 1.5), []);
   const photoGeometry = useMemo(() => new THREE.PlaneGeometry(1, 1), []);
@@ -195,13 +193,28 @@ const PhotoOrnaments = ({ state }: { state: 'CHAOS' | 'FORMED' }) => {
     });
   });
 
+  // 射线检测
+  const { camera, gl } = useThree();
+  const raycaster = useRef(new THREE.Raycaster());
+  const mouse = useRef(new THREE.Vector2());
+
+  const handleClick = useCallback((e: any, index: number) => {
+    e.stopPropagation();
+    const position = data[index].currentPos.clone();
+    onPhotoClick(index, position);
+  }, [data, onPhotoClick]);
+
   return (
     <group ref={groupRef}>
       {data.map((obj, i) => (
         <group key={i} scale={[obj.scale, obj.scale, obj.scale]} rotation={state === 'CHAOS' ? obj.chaosRotation : [0,0,0]}>
           {/* 正面 */}
           <group position={[0, 0, 0.015]}>
-            <mesh geometry={photoGeometry}>
+            <mesh 
+              geometry={photoGeometry}
+              onClick={(e) => handleClick(e, i)}
+              ref={(el) => (meshRefs.current[i] = el)}
+            >
               <meshStandardMaterial
                 map={textures[obj.textureIndex]}
                 roughness={0.5} metalness={0}
@@ -215,7 +228,11 @@ const PhotoOrnaments = ({ state }: { state: 'CHAOS' | 'FORMED' }) => {
           </group>
           {/* 背面 */}
           <group position={[0, 0, -0.015]} rotation={[0, Math.PI, 0]}>
-            <mesh geometry={photoGeometry}>
+            <mesh 
+              geometry={photoGeometry}
+              onClick={(e) => handleClick(e, i)}
+              ref={(el) => (meshRefs.current[i] = el)}
+            >
               <meshStandardMaterial
                 map={textures[obj.textureIndex]}
                 roughness={0.5} metalness={0}
@@ -229,6 +246,113 @@ const PhotoOrnaments = ({ state }: { state: 'CHAOS' | 'FORMED' }) => {
           </group>
         </group>
       ))}
+    </group>
+  );
+};
+
+// --- Component: Top Photo (独立的顶部照片组件) ---
+const TopPhoto = ({ state, onPhotoClick }: { state: 'CHAOS' | 'FORMED', onPhotoClick: (index: number, position: THREE.Vector3) => void }) => {
+  const [texture] = useTexture(['/photos/top.jpg']);
+  const groupRef = useRef<THREE.Group>(null);
+  const meshRef = useRef<THREE.Mesh | null>(null);
+
+  const borderGeometry = useMemo(() => new THREE.PlaneGeometry(1.2, 1.5), []);
+  const photoGeometry = useMemo(() => new THREE.PlaneGeometry(1, 1), []);
+
+  // 顶部照片的目标位置
+  const targetPos = useMemo(() => new THREE.Vector3(0, CONFIG.tree.height / 2 - 1.5, 0), []);
+  const chaosPos = useMemo(() => new THREE.Vector3(
+    (Math.random() - 0.5) * 70,
+    (Math.random() - 0.5) * 70,
+    (Math.random() - 0.5) * 70
+  ), []);
+
+  const currentPos = useRef(chaosPos.clone());
+  const rotationSpeed = useRef({
+    x: (Math.random() - 0.5) * 1.0,
+    y: (Math.random() - 0.5) * 1.0,
+    z: (Math.random() - 0.5) * 1.0
+  });
+  const wobbleOffset = useRef(Math.random() * 10);
+  const wobbleSpeed = useRef(0.5 + Math.random() * 0.5);
+  const borderColor = useRef(CONFIG.colors.borders[Math.floor(Math.random() * CONFIG.colors.borders.length)]);
+
+  useFrame((stateObj, delta) => {
+    if (!groupRef.current) return;
+    const isFormed = state === 'FORMED';
+    const time = stateObj.clock.elapsedTime;
+    
+    const target = isFormed ? targetPos : chaosPos;
+    currentPos.current.lerp(target, delta * (isFormed ? 0.8 : 0.5));
+    
+    groupRef.current.position.copy(currentPos.current);
+    
+    if (isFormed) {
+      // 面向相机
+      const targetLookPos = new THREE.Vector3(groupRef.current.position.x * 2, groupRef.current.position.y + 0.5, groupRef.current.position.z * 2);
+      groupRef.current.lookAt(targetLookPos);
+      
+      // 摆动效果
+      const wobbleX = Math.sin(time * wobbleSpeed.current + wobbleOffset.current) * 0.05;
+      const wobbleZ = Math.cos(time * wobbleSpeed.current * 0.8 + wobbleOffset.current) * 0.05;
+      groupRef.current.rotation.x += wobbleX;
+      groupRef.current.rotation.z += wobbleZ;
+    } else {
+      groupRef.current.rotation.x += delta * rotationSpeed.current.x;
+      groupRef.current.rotation.y += delta * rotationSpeed.current.y;
+      groupRef.current.rotation.z += delta * rotationSpeed.current.z;
+    }
+  });
+
+  const handleClick = useCallback((e: any) => {
+    e.stopPropagation();
+    onPhotoClick(-1, currentPos.current.clone()); // -1 表示是 top.jpg
+  }, [onPhotoClick]);
+
+  return (
+    <group ref={groupRef}>
+      {/* 正面 */}
+      <group position={[0, 0, 0.015]}>
+        <mesh 
+          geometry={photoGeometry}
+          onClick={handleClick}
+          ref={meshRef}
+        >
+          <meshStandardMaterial
+            map={texture}
+            roughness={0.5}
+            metalness={0}
+            emissive={CONFIG.colors.white}
+            emissiveMap={texture}
+            emissiveIntensity={1.0}
+            side={THREE.FrontSide}
+          />
+        </mesh>
+        <mesh geometry={borderGeometry} position={[0, -0.15, -0.01]}>
+          <meshStandardMaterial color={borderColor.current} roughness={0.9} metalness={0} side={THREE.FrontSide} />
+        </mesh>
+      </group>
+      {/* 背面 */}
+      <group position={[0, 0, -0.015]} rotation={[0, Math.PI, 0]}>
+        <mesh 
+          geometry={photoGeometry}
+          onClick={handleClick}
+          ref={meshRef}
+        >
+          <meshStandardMaterial
+            map={texture}
+            roughness={0.5}
+            metalness={0}
+            emissive={CONFIG.colors.white}
+            emissiveMap={texture}
+            emissiveIntensity={1.0}
+            side={THREE.FrontSide}
+          />
+        </mesh>
+        <mesh geometry={borderGeometry} position={[0, -0.15, -0.01]}>
+          <meshStandardMaterial color={borderColor.current} roughness={0.9} metalness={0} side={THREE.FrontSide} />
+        </mesh>
+      </group>
     </group>
   );
 };
@@ -380,7 +504,11 @@ const TopStar = ({ state }: { state: 'CHAOS' | 'FORMED' }) => {
 };
 
 // --- Main Scene Experience ---
-const Experience = ({ sceneState, rotationSpeed }: { sceneState: 'CHAOS' | 'FORMED', rotationSpeed: number }) => {
+const Experience = ({ sceneState, rotationSpeed, onPhotoClick }: { 
+  sceneState: 'CHAOS' | 'FORMED', 
+  rotationSpeed: number,
+  onPhotoClick: (index: number, position: THREE.Vector3) => void 
+}) => {
   const controlsRef = useRef<any>(null);
   useFrame(() => {
     if (controlsRef.current) {
@@ -406,7 +534,8 @@ const Experience = ({ sceneState, rotationSpeed }: { sceneState: 'CHAOS' | 'FORM
       <group position={[0, -6, 0]}>
         <Foliage state={sceneState} />
         <Suspense fallback={null}>
-           <PhotoOrnaments state={sceneState} />
+           <PhotoOrnaments state={sceneState} onPhotoClick={onPhotoClick} />
+           <TopPhoto state={sceneState} onPhotoClick={onPhotoClick} />
            <ChristmasElements state={sceneState} />
            <FairyLights state={sceneState} />
            <TopStar state={sceneState} />
@@ -424,7 +553,7 @@ const Experience = ({ sceneState, rotationSpeed }: { sceneState: 'CHAOS' | 'FORM
 
 // --- Gesture Controller ---
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-const GestureController = ({ onGesture, onMove, onStatus, debugMode }: any) => {
+const GestureController = ({ onGesture, onMove, onTilt, onStatus, debugMode }: any) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
@@ -482,18 +611,38 @@ const GestureController = ({ onGesture, onMove, onStatus, debugMode }: any) => {
                  if (name === "Open_Palm") onGesture("CHAOS"); if (name === "Closed_Fist") onGesture("FORMED");
                  if (debugMode) onStatus(`DETECTED: ${name}`);
               }
+              
+              // 检测食指位置进行视角控制
               if (results.landmarks.length > 0) {
-                const speed = (0.5 - results.landmarks[0][0].x) * 0.15;
-                onMove(Math.abs(speed) > 0.01 ? speed : 0);
+                const landmarks = results.landmarks[0];
+                // 食指尖端索引是8
+                const indexTip = landmarks[8];
+                // 腕部索引是0
+                const wrist = landmarks[0];
+                
+                // 计算食指尖相对于手腕的位置
+                const xDiff = indexTip.x - wrist.x;
+                const yDiff = indexTip.y - wrist.y;
+                
+                // 转换为视角控制参数
+                const moveSpeed = xDiff * 0.15;
+                const tiltSpeed = yDiff * 0.15;
+                
+                onMove(Math.abs(moveSpeed) > 0.01 ? moveSpeed : 0);
+                onTilt(Math.abs(tiltSpeed) > 0.01 ? tiltSpeed : 0);
               }
-            } else { onMove(0); if (debugMode) onStatus("AI READY: NO HAND"); }
+            } else { 
+              onMove(0); 
+              onTilt(0);
+              if (debugMode) onStatus("AI READY: NO HAND"); 
+            }
         }
         requestRef = requestAnimationFrame(predictWebcam);
       }
     };
     setup();
     return () => cancelAnimationFrame(requestRef);
-  }, [onGesture, onMove, onStatus, debugMode]);
+  }, [onGesture, onMove, onTilt, onStatus, debugMode]);
 
   return (
     <>
@@ -503,21 +652,131 @@ const GestureController = ({ onGesture, onMove, onStatus, debugMode }: any) => {
   );
 };
 
+// --- 点击照片后显示的全屏照片组件 ---
+const PhotoDisplay = ({ selectedPhoto, onClose }: { selectedPhoto: {index: number, position: THREE.Vector3} | null, onClose: () => void }) => {
+  if (!selectedPhoto) return null;
+
+  // 根据索引获取照片路径
+  const photoPath = selectedPhoto.index === -1 
+    ? '/photos/top.jpg' 
+    : `/photos/${selectedPhoto.index % CONFIG.photos.body.length + 1}.jpg`;
+
+  return (
+    <div 
+      style={{ 
+        position: 'absolute', 
+        top: 0, 
+        left: 0, 
+        width: '100vw', 
+        height: '100vh', 
+        backgroundColor: 'rgba(0,0,0,0.9)', 
+        zIndex: 20, 
+        display: 'flex', 
+        justifyContent: 'center', 
+        alignItems: 'center',
+        flexDirection: 'column'
+      }}
+      onClick={onClose}
+    >
+      <div 
+        style={{ 
+          maxWidth: '90%', 
+          maxHeight: '80%', 
+          display: 'flex', 
+          justifyContent: 'center', 
+          alignItems: 'center',
+          position: 'relative'
+        }}
+      >
+        <img 
+          src={photoPath} 
+          alt={`Photo ${selectedPhoto.index === -1 ? 'top' : selectedPhoto.index % CONFIG.photos.body.length + 1}`}
+          style={{ 
+            maxWidth: '100%', 
+            maxHeight: '100%', 
+            objectFit: 'contain',
+            borderRadius: '8px',
+            boxShadow: '0 0 30px rgba(255, 215, 0, 0.5)'
+          }}
+          onError={(e) => {
+            console.error('Failed to load image:', photoPath);
+            (e.target as HTMLImageElement).src = 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200" viewBox="0 0 24 24"><rect width="24" height="24" fill="%23333"/><text x="12" y="12" font-size="12" text-anchor="middle" fill="%23ccc" alignment-baseline="middle">Image not found</text></svg>';
+          }}
+        />
+        <button 
+          onClick={(e) => {
+            e.stopPropagation();
+            onClose();
+          }} 
+          style={{ 
+            position: 'absolute', 
+            top: '20px', 
+            right: '20px', 
+            background: 'rgba(0,0,0,0.7)', 
+            color: '#FFD700', 
+            border: '1px solid #FFD700', 
+            borderRadius: '50%', 
+            width: '40px', 
+            height: '40px', 
+            fontSize: '20px', 
+            cursor: 'pointer',
+            display: 'flex',
+            justifyContent: 'center',
+            alignItems: 'center'
+          }}
+        >
+          ×
+        </button>
+      </div>
+      <div style={{ 
+        marginTop: '20px', 
+        color: 'white', 
+        textAlign: 'center',
+        fontSize: '18px'
+      }}>
+        <p>Photo: {selectedPhoto.index === -1 ? 'top.jpg' : `${selectedPhoto.index % CONFIG.photos.body.length + 1}.jpg`}</p>
+        <p>Position: ({selectedPhoto.position.x.toFixed(2)}, {selectedPhoto.position.y.toFixed(2)}, {selectedPhoto.position.z.toFixed(2)})</p>
+      </div>
+    </div>
+  );
+};
+
 // --- App Entry ---
 export default function GrandTreeApp() {
   const [sceneState, setSceneState] = useState<'CHAOS' | 'FORMED'>('CHAOS');
   const [rotationSpeed, setRotationSpeed] = useState(0);
+  const [tiltSpeed, setTiltSpeed] = useState(0);
   const [aiStatus, setAiStatus] = useState("INITIALIZING...");
   const [debugMode, setDebugMode] = useState(false);
+  const [selectedPhoto, setSelectedPhoto] = useState<{index: number, position: THREE.Vector3} | null>(null);
+
+  const handlePhotoClick = useCallback((index: number, position: THREE.Vector3) => {
+    console.log(`照片 ${index === -1 ? 'top.jpg' : `${index % CONFIG.photos.body.length + 1}.jpg`} 被点击`, position);
+    setSelectedPhoto({ index, position });
+  }, []);
+
+  // 使用useEffect来处理tiltSpeed变化
+  useEffect(() => {
+    const controlsRef = document.querySelector('[data-orbit-controls]');
+    if (controlsRef) {
+      // 这里可以更新相机的俯仰角
+    }
+  }, [tiltSpeed]);
 
   return (
     <div style={{ width: '100vw', height: '100vh', backgroundColor: '#000', position: 'relative', overflow: 'hidden' }}>
       <div style={{ width: '100%', height: '100%', position: 'absolute', top: 0, left: 0, zIndex: 1 }}>
         <Canvas dpr={[1, 2]} gl={{ toneMapping: THREE.ReinhardToneMapping }} shadows>
-            <Experience sceneState={sceneState} rotationSpeed={rotationSpeed} />
+            <Experience sceneState={sceneState} rotationSpeed={rotationSpeed} onPhotoClick={handlePhotoClick} />
         </Canvas>
       </div>
-      <GestureController onGesture={setSceneState} onMove={setRotationSpeed} onStatus={setAiStatus} debugMode={debugMode} />
+      <GestureController 
+        onGesture={setSceneState} 
+        onMove={setRotationSpeed} 
+        onTilt={setTiltSpeed}
+        onStatus={setAiStatus} 
+        debugMode={debugMode} 
+      />
 
       {/* UI - Stats */}
       <div style={{ position: 'absolute', bottom: '30px', left: '40px', color: '#888', zIndex: 10, fontFamily: 'sans-serif', userSelect: 'none' }}>
@@ -549,6 +808,14 @@ export default function GrandTreeApp() {
       <div style={{ position: 'absolute', top: '20px', left: '50%', transform: 'translateX(-50%)', color: aiStatus.includes('ERROR') ? '#FF0000' : 'rgba(255, 215, 0, 0.4)', fontSize: '10px', letterSpacing: '2px', zIndex: 10, background: 'rgba(0,0,0,0.5)', padding: '4px 8px', borderRadius: '4px' }}>
         {aiStatus}
       </div>
+
+      {/* 点击照片后显示的全屏照片组件 */}
+      {selectedPhoto && (
+        <PhotoDisplay 
+          selectedPhoto={selectedPhoto} 
+          onClose={() => setSelectedPhoto(null)} 
+        />
+      )}
     </div>
   );
 }
